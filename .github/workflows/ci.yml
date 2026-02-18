@@ -1,0 +1,73 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "services/**"
+      - "buildspec.yml"
+      - ".github/workflows/ci.yml"
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  trigger-codebuild:
+    runs-on: ubuntu-latest
+    environment: dev
+
+    steps:
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Trigger CodeBuild
+        id: trigger
+        run: |
+          BUILD_ID=$(aws codebuild start-build \
+            --project-name shopstack-catalog-dev \
+            --region us-east-1 \
+            --query 'build.id' \
+            --output text)
+          echo "build_id=$BUILD_ID" >> $GITHUB_OUTPUT
+          echo "Triggered build: $BUILD_ID"
+
+      - name: Poll build status
+        run: |
+          BUILD_ID="${{ steps.trigger.outputs.build_id }}"
+          echo "Polling build: $BUILD_ID"
+
+          for i in $(seq 1 40); do
+            STATUS=$(aws codebuild batch-get-builds \
+              --ids "$BUILD_ID" \
+              --query 'builds[0].buildStatus' \
+              --output text \
+              --region us-east-1)
+
+            PHASE=$(aws codebuild batch-get-builds \
+              --ids "$BUILD_ID" \
+              --query 'builds[0].currentPhase' \
+              --output text \
+              --region us-east-1)
+
+            echo "[$i/40] Status: $STATUS | Phase: $PHASE"
+
+            if [ "$STATUS" = "SUCCEEDED" ]; then
+              echo "Build succeeded."
+              exit 0
+            elif [ "$STATUS" = "FAILED" ] || \
+                 [ "$STATUS" = "STOPPED" ] || \
+                 [ "$STATUS" = "TIMED_OUT" ]; then
+              echo "Build failed with status: $STATUS"
+              exit 1
+            fi
+
+            sleep 30
+          done
+
+          echo "Timed out waiting for build."
+          exit 1
