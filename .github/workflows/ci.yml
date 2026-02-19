@@ -14,60 +14,77 @@ permissions:
   contents: read
 
 jobs:
-  trigger-codebuild:
+  build-and-push:
     runs-on: ubuntu-latest
     environment: dev
 
     steps:
+      - name: Checkout apps-sre
+        uses: actions/checkout@v4
+
       - name: Configure AWS credentials via OIDC
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: us-east-1
 
-      - name: Trigger CodeBuild
-        id: trigger
+      - name: Log in to ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set image tag
+        id: vars
         run: |
-          BUILD_ID=$(aws codebuild start-build \
-            --project-name shopstack-catalog-dev \
-            --region us-east-1 \
-            --query 'build.id' \
-            --output text)
-          echo "build_id=$BUILD_ID" >> $GITHUB_OUTPUT
-          echo "Triggered build: $BUILD_ID"
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          echo "tag=$SHORT_SHA" >> $GITHUB_OUTPUT
+          echo "image=770132776547.dkr.ecr.us-east-1.amazonaws.com/shopstack-catalog:$SHORT_SHA" >> $GITHUB_OUTPUT
+          echo "Image: 770132776547.dkr.ecr.us-east-1.amazonaws.com/shopstack-catalog:$SHORT_SHA"
 
-      - name: Poll build status
+      - name: Build Docker image
         run: |
-          BUILD_ID="${{ steps.trigger.outputs.build_id }}"
-          echo "Polling build: $BUILD_ID"
+          docker build \
+            -t "${{ steps.vars.outputs.image }}" \
+            -t "770132776547.dkr.ecr.us-east-1.amazonaws.com/shopstack-catalog:latest" \
+            services/catalog
 
-          for i in $(seq 1 40); do
-            STATUS=$(aws codebuild batch-get-builds \
-              --ids "$BUILD_ID" \
-              --query 'builds[0].buildStatus' \
-              --output text \
-              --region us-east-1)
+      - name: Push to ECR
+        run: |
+          docker push "${{ steps.vars.outputs.image }}"
+          docker push "770132776547.dkr.ecr.us-east-1.amazonaws.com/shopstack-catalog:latest"
 
-            PHASE=$(aws codebuild batch-get-builds \
-              --ids "$BUILD_ID" \
-              --query 'builds[0].currentPhase' \
-              --output text \
-              --region us-east-1)
+      - name: Get GitHub token from Secrets Manager
+        id: github-token
+        run: |
+          TOKEN=$(aws secretsmanager get-secret-value \
+            --secret-id shopstack/dev/github-token \
+            --query SecretString \
+            --output text \
+            --region us-east-1)
+          echo "::add-mask::$TOKEN"
+          echo "token=$TOKEN" >> $GITHUB_OUTPUT
 
-            echo "[$i/40] Status: $STATUS | Phase: $PHASE"
+      - name: Update GitOps and open PR
+        run: |
+          SHORT_SHA="${{ steps.vars.outputs.tag }}"
+          FULL_SHA="${{ github.sha }}"
+          BRANCH="chore/catalog-image-${SHORT_SHA}"
 
-            if [ "$STATUS" = "SUCCEEDED" ]; then
-              echo "Build succeeded."
-              exit 0
-            elif [ "$STATUS" = "FAILED" ] || \
-                 [ "$STATUS" = "STOPPED" ] || \
-                 [ "$STATUS" = "TIMED_OUT" ]; then
-              echo "Build failed with status: $STATUS"
-              exit 1
-            fi
+          git config --global url."https://${{ steps.github-token.outputs.token }}@github.com/".insteadOf "https://github.com/"
+          git config --global user.email "ci@shopstack"
+          git config --global user.name "ShopStack CI"
 
-            sleep 30
-          done
+          cd /tmp
+          git clone https://github.com/juandiegocv27/cluster-gitops.git
+          cd cluster-gitops
 
-          echo "Timed out waiting for build."
-          exit 1
+          git checkout -b "$BRANCH"
+          sed -i "s/^\(\s*newTag:\s*\).*/\1\"${FULL_SHA}\"/" \
+            apps/catalog/overlays/dev/kustomization.yaml
+
+          echo "Git diff:"
+          git diff
+
+          git add apps/catalog/overlays/dev/kustomization.yaml
+          git commit -m "chore: bump catalog image to ${SHORT_SHA}"
+          git push origin "$BRANCH"
+
+          echo "Branch pushed: $BRANCH"
