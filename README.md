@@ -99,7 +99,7 @@ apps/
 
 | Repo | Role |
 |---|---|
-| [`infra-terraform`](https://github.com/juandiegocv27/infra-terraform) | Provisions all AWS resources used by this pipeline |
+| [`shopstack`](https://github.com/juandiegocv27/infra-terraform) | Provisions all AWS resources used by this pipeline |
 | [`cluster-gitops`](https://github.com/juandiegocv27/cluster-gitops) | Receives image bump PRs from this pipeline |
 
 ---
